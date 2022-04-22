@@ -57,15 +57,23 @@ type Flower struct {
 	DestIPMask    net.IPMask
 	SrcIP         net.IP
 	SrcIPMask     net.IPMask
+	TcpSrcPort    uint16
+	TcpDestPort   uint16
+	UdpSrcPort    uint16
+	UdpDestPort   uint16
+	SctpSrcPort   uint16
+	SctpDestPort  uint16
 	EthType       uint16
+	IPProto       uint8
 	EncDestIP     net.IP
 	EncDestIPMask net.IPMask
 	EncSrcIP      net.IP
 	EncSrcIPMask  net.IPMask
 	EncDestPort   uint16
 	EncKeyId      uint32
-
-	Actions []Action
+	ClassID       uint32
+	Flags         uint32
+	Actions       []Action
 }
 
 func (filter *Flower) Attrs() *FilterAttrs {
@@ -100,18 +108,33 @@ func (filter *Flower) encodeIP(parent *nl.RtAttr, ip net.IP, mask net.IPMask, v4
 }
 
 func (filter *Flower) encode(parent *nl.RtAttr) error {
-	if filter.EthType != 0 {
-		parent.AddRtAttr(nl.TCA_FLOWER_KEY_ETH_TYPE, htons(filter.EthType))
+	if filter.DestIP != nil {
+		filter.encodeIP(parent, filter.DestIP, filter.DestIPMask,
+			nl.TCA_FLOWER_KEY_IPV4_DST, nl.TCA_FLOWER_KEY_IPV6_DST,
+			nl.TCA_FLOWER_KEY_IPV4_DST_MASK, nl.TCA_FLOWER_KEY_IPV6_DST_MASK)
 	}
 	if filter.SrcIP != nil {
 		filter.encodeIP(parent, filter.SrcIP, filter.SrcIPMask,
 			nl.TCA_FLOWER_KEY_IPV4_SRC, nl.TCA_FLOWER_KEY_IPV6_SRC,
 			nl.TCA_FLOWER_KEY_IPV4_SRC_MASK, nl.TCA_FLOWER_KEY_IPV6_SRC_MASK)
 	}
-	if filter.DestIP != nil {
-		filter.encodeIP(parent, filter.DestIP, filter.DestIPMask,
-			nl.TCA_FLOWER_KEY_IPV4_DST, nl.TCA_FLOWER_KEY_IPV6_DST,
-			nl.TCA_FLOWER_KEY_IPV4_DST_MASK, nl.TCA_FLOWER_KEY_IPV6_DST_MASK)
+	if filter.TcpDestPort != 0 {
+		parent.AddRtAttr(nl.TCA_FLOWER_KEY_TCP_DST, htons(filter.TcpDestPort))
+	}
+	if filter.TcpSrcPort != 0 {
+		parent.AddRtAttr(nl.TCA_FLOWER_KEY_TCP_SRC, htons(filter.TcpSrcPort))
+	}
+	if filter.UdpDestPort != 0 {
+		parent.AddRtAttr(nl.TCA_FLOWER_KEY_UDP_DST, htons(filter.UdpDestPort))
+	}
+	if filter.UdpSrcPort != 0 {
+		parent.AddRtAttr(nl.TCA_FLOWER_KEY_UDP_SRC, htons(filter.UdpSrcPort))
+	}
+	if filter.SctpDestPort != 0 {
+		parent.AddRtAttr(nl.TCA_FLOWER_KEY_SCTP_DST, htons(filter.SctpDestPort))
+	}
+	if filter.SctpSrcPort != 0 {
+		parent.AddRtAttr(nl.TCA_FLOWER_KEY_SCTP_SRC, htons(filter.SctpSrcPort))
 	}
 	if filter.EncSrcIP != nil {
 		filter.encodeIP(parent, filter.EncSrcIP, filter.EncSrcIPMask,
@@ -129,11 +152,25 @@ func (filter *Flower) encode(parent *nl.RtAttr) error {
 	if filter.EncKeyId != 0 {
 		parent.AddRtAttr(nl.TCA_FLOWER_KEY_ENC_KEY_ID, htonl(filter.EncKeyId))
 	}
-
-	actionsAttr := parent.AddRtAttr(nl.TCA_FLOWER_ACT, nil)
-	if err := EncodeActions(actionsAttr, filter.Actions); err != nil {
-		return err
+	if filter.IPProto != 0 {
+		parent.AddRtAttr(nl.TCA_FLOWER_KEY_IP_PROTO, nl.Uint8Attr(filter.IPProto))
 	}
+	if len(filter.Actions) > 0 {
+		actionsAttr := parent.AddRtAttr(nl.TCA_FLOWER_ACT, nil)
+		if err := EncodeActions(actionsAttr, filter.Actions); err != nil {
+			return err
+		}
+	}
+	if filter.EthType != 0 {
+		parent.AddRtAttr(nl.TCA_FLOWER_KEY_ETH_TYPE, htons(filter.EthType))
+	}
+	if filter.ClassID != 0 {
+		parent.AddRtAttr(nl.TCA_FLOWER_CLASSID, nl.Uint32Attr(filter.ClassID))
+	}
+	if filter.Flags != 0 {
+		parent.AddRtAttr(nl.TCA_FLOWER_FLAGS, nl.Uint32Attr(filter.Flags))
+	}
+
 	return nil
 }
 
@@ -171,6 +208,24 @@ func (filter *Flower) decode(data []syscall.NetlinkRouteAttr) error {
 			if err != nil {
 				return err
 			}
+		case nl.TCA_FLOWER_CLASSID:
+			filter.ClassID = native.Uint32(datum.Value)
+		case nl.TCA_FLOWER_FLAGS:
+			filter.Flags = native.Uint32(datum.Value)
+		case nl.TCA_FLOWER_KEY_TCP_DST:
+			filter.TcpDestPort = ntohs(datum.Value)
+		case nl.TCA_FLOWER_KEY_UDP_DST:
+			filter.UdpDestPort = ntohs(datum.Value)
+		case nl.TCA_FLOWER_KEY_SCTP_DST:
+			filter.SctpDestPort = ntohs(datum.Value)
+		case nl.TCA_FLOWER_KEY_TCP_SRC:
+			filter.TcpSrcPort = ntohs(datum.Value)
+		case nl.TCA_FLOWER_KEY_UDP_SRC:
+			filter.UdpSrcPort = ntohs(datum.Value)
+		case nl.TCA_FLOWER_KEY_SCTP_SRC:
+			filter.SctpSrcPort = ntohs(datum.Value)
+		case nl.TCA_FLOWER_KEY_IP_PROTO:
+			filter.IPProto = uint8(datum.Value[0])
 		}
 	}
 	return nil
@@ -238,7 +293,6 @@ func (h *Handle) filterModify(filter Filter, flags int) error {
 	req.AddData(nl.NewRtAttr(nl.TCA_KIND, nl.ZeroTerminated(filter.Type())))
 
 	options := nl.NewRtAttr(nl.TCA_OPTIONS, nil)
-
 	switch filter := filter.(type) {
 	case *U32:
 		sel := filter.Sel
@@ -581,7 +635,7 @@ func EncodeActions(attr *nl.RtAttr, actions []Action) error {
 			table := attr.AddRtAttr(tabIndex, nil)
 			tabIndex++
 			table.AddRtAttr(nl.TCA_ACT_KIND, nl.ZeroTerminated("skbedit"))
-			aopts := table.AddRtAttr(nl.TCA_ACT_OPTIONS, nil)
+			aopts := table.AddRtAttr(nl.TCA_ACT_OPTIONS|unix.NLA_F_NESTED, nil)
 			skbedit := nl.TcSkbEdit{}
 			toTcGen(action.Attrs(), &skbedit.TcGen)
 			aopts.AddRtAttr(nl.TCA_SKBEDIT_PARMS, skbedit.Serialize())
